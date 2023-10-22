@@ -1,0 +1,521 @@
+---
+title: "Data Wrangling and Husbandry Final Project"
+author: "Team 11"
+date: "2023-04-23"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Required Packages
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(stringr)
+library(jsonlite)
+library(httr)
+library(plotly)
+library(ggplot2)
+library(ggmap)
+```
+
+# Reading the Data from the API and storing it to CSV file. (Done only once). It is an open API so no specific key requirement is there.
+```{r}
+system("curl 'https://data.cityofnewyork.us/resource/76xm-jjuj.csv?$limit=2300000' -o nyc_ems.csv")
+```
+
+# Reading the data from csv created above.
+
+```{r}
+data <- read.csv("nyc_ems.csv")
+head(data)
+```
+
+#Checking the dimesnions of the data
+```{r}
+dim(data)
+```
+
+# Cleaning process
+```{r}
+colnames(data)
+```
+
+
+#Removing the unnecessary columns not required for our use case.
+```{r}
+clean_data <- data %>% 
+  select(-c(valid_dispatch_rspns_time_indc,first_activation_datetime,valid_incident_rspns_time_indc,borough,incident_dispatch_area,policeprecinct,citycouncildistrict,communitydistrict,communityschooldistrict,congressionaldistrict,first_on_scene_datetime,first_to_hosp_datetime,first_hosp_arrival_datetime))
+```
+
+
+#Renaming the column names accordingly for ease.
+```{r}
+clean_data <- clean_data %>%
+  rename(incident_id = cad_incident_id,initial_call_reason = initial_call_type,final_call_reason=final_call_type,time_elapsed_assignment=dispatch_response_seconds_qy,
+         time_incident_response=incident_response_seconds_qy,time_incident_travel=incident_travel_tm_seconds_qy)
+```
+
+#Checking for all the NA values
+```{r}
+sapply(clean_data, function(x) sum(is.na(x)))
+```
+
+#Removing rows having NA values as we would still have a large sample of data.
+```{r}
+clean_data<- na.omit(clean_data)
+```
+
+#Checking the dimesnion of cleaned data
+```{r}
+dim(clean_data)
+```
+
+
+#Converting columns in data-time format as they were in string format.
+```{r}
+clean_data <- clean_data %>%
+  mutate(incident_datetime = ymd_hms(incident_datetime),
+         incident_close_datetime = ymd_hms(incident_close_datetime),
+         first_assignment_datetime=ymd_hms(first_assignment_datetime),)
+```
+
+```{r}
+# count number of rows where incident_close_datetime is before or equal to incident_datetime
+sum(clean_data$first_assignment_datetime < clean_data$incident_datetime, na.rm = TRUE)
+```
+
+```{r}
+# count number of rows where incident_close_datetime is before or equal to incident_datetime
+sum(clean_data$incident_close_datetime < clean_data$first_assignment_datetime, na.rm = TRUE)
+```
+
+```{r}
+clean_data <- clean_data %>%
+  filter(incident_close_datetime > first_assignment_datetime)
+```
+
+```{r}
+# Count the number of duplicate incident IDs
+sum(duplicated(clean_data$incident_id))
+```
+
+```{r}
+# Remove the duplicate incidents
+clean_data <- distinct(clean_data, incident_id, .keep_all = TRUE)
+```
+
+```{r}
+clean_data$initial_severity_level_code <- as.integer(clean_data$initial_severity_level_code)
+clean_data$final_severity_level_code <- as.integer(clean_data$final_severity_level_code)
+```
+
+```{r}
+# Check for out-of-range values in initial_severity_level_code
+sum(!between(clean_data$initial_severity_level_code, 1, 8))
+# Check for out-of-range values in final_severity_level_code
+sum(!between(clean_data$final_severity_level_code, 1, 8))
+```
+
+```{r}
+# Filter the rows where initial_severity_level_code is out of range
+clean_data %>% 
+  filter(initial_severity_level_code < 1 | initial_severity_level_code > 8) %>%
+  select(initial_severity_level_code)
+
+```
+
+```{r}
+clean_data <- clean_data %>% 
+  filter(initial_severity_level_code >= 1 & initial_severity_level_code <= 8)
+```
+
+```{r}
+table(clean_data$held_indicator[!clean_data$held_indicator %in% c("N", "Y")])
+table(clean_data$reopen_indicator[!clean_data$reopen_indicator %in% c("N", "Y")])
+table(clean_data$special_event_indicator[!clean_data$special_event_indicator %in% c("N", "Y")])
+table(clean_data$standby_indicator[!clean_data$standby_indicator %in% c("N", "Y")])
+table(clean_data$transfer_indicator[!clean_data$transfer_indicator %in% c("N", "Y")])
+```
+
+
+```{r}
+# Define the regex pattern for a valid US zip code
+zip_pattern <- "^[0-9]{5}(?:-[0-9]{4})?$"
+
+# Apply the regex pattern to the zipcode column in clean_data
+length(which(!str_detect(clean_data$zipcode, zip_pattern)))
+
+```
+
+```{r}
+clean_data %>%
+  filter(!str_detect(zipcode, "^\\d{5}(-\\d{4})?$")) %>%
+  select(zipcode)
+```
+
+```{r}
+clean_data <- clean_data %>% 
+             filter(grepl("^\\d{5}(-\\d{4})?$", zipcode))
+```
+
+
+```{r}
+clean_data$time_elapsed_assignment <- as.integer(clean_data$time_elapsed_assignment)
+clean_data$time_incident_response<- as.integer(clean_data$time_incident_response)
+clean_data$time_incident_travel <- as.integer(clean_data$time_incident_travel)
+```
+
+
+```{r}
+clean_data <- subset(clean_data, incident_disposition_code %in% c("82", "83","87","90","91","92","93","94","95","96","CANCEL","DUP","NOTSNT","ZZZZZZ"))
+
+```
+
+
+```{r}
+code_meaning_map <- c("82" = "transporting patient", "83" = "patient pronounced dead", "87" = "cancelled", "90" = "unfounded", "91" = "condition corrected", "92" = "treated not transported", "93" = "refused medical aid", "94" = "treated and transported", "95" = "triaged at scene no transport", "96" = "patient gone on arrival", "CANCEL" = "cancelled", "DUP" = "duplicate incident", "NOTSNT" = "unit not sent", "ZZZZZZ" = "no disposition")
+
+```
+
+```{r}
+clean_data <- mutate(clean_data, incident_disposition_code_meaning = code_meaning_map[as.character(incident_disposition_code)])
+
+```
+
+```{r}
+str(clean_data)
+```
+
+
+```{r}
+write.csv(clean_data, file = "clean_data.csv", row.names = TRUE)
+```
+
+# Analysis
+
+# UseCase -1
+
+#We need to catagorize the call time in 4 categorize: Morning, Noon, Evening & Night.
+```{r}
+# Create function to categorize call time
+categorize_call_time <- function(call_time) {
+  hour <- as.numeric(format(call_time, "%H"))
+  if (hour >= 5 && hour < 12) {
+    return("Morning")
+  } else if (hour >= 12 && hour < 17) {
+    return("Noon")
+  } else if (hour >= 17 && hour < 21) {
+    return("Evening")
+  } else {
+    return("Night")
+  }
+}
+
+# Apply function to incident_datetime column to create new column
+clean_data$call_time_category <- sapply(clean_data$incident_datetime, categorize_call_time)
+```
+
+
+#Displaying the time category having the most incident_datetime.
+```{r}
+clean_data %>% 
+  group_by(call_time_category) %>% 
+  summarize(count = n()) %>% 
+  arrange(desc(count))
+```
+
+
+#Plotting a pie chart showing % of incidents in each call time category.
+```{r}
+# Calculate percentages for each category
+percentages <- clean_data %>%
+  group_by(call_time_category) %>%
+  summarize(count = n()) %>%
+  mutate(percent = count / sum(count) * 100)
+
+# Create pie chart with percentages
+ggplot(percentages, aes(x = "", y = percent, fill = call_time_category)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  theme(legend.position = "bottom") +
+  geom_text(aes(label = paste0(round(percent), "%")), position = position_stack(vjust = 0.5)) +
+  labs(title = "Call Time Category Distribution", fill = "Call Time Category")
+```
+
+# UseCase-2
+```{r}
+# Group the data by time category
+response_time_by_time_category <- clean_data %>%
+  group_by(call_time_category) %>%
+  # Calculate the average response time
+  summarize(avg_response_time = mean(time_incident_response, na.rm = TRUE)) %>%
+  # Sort the data by average response time in ascending order
+  arrange(avg_response_time)
+
+# View the resulting data
+response_time_by_time_category
+```
+```{r}
+ggplot(clean_data, aes(x = call_time_category, y = time_incident_response)) +
+  geom_boxplot() +
+  labs(x = "Call Time Category", y = "Time Incident Response (seconds)",
+       title = "Distribution of Time Incident Response by Call Time Category")
+```
+
+#### We can see that these points are outliers. Although the outliers may be special cases, we considered to move forward without them as we wanted to find general patterns.
+
+
+# UseCase - 3
+
+#We are going to analysis the average response and assignment times for different time categories of calls. The response time is the time between the initial call and the first unit being assigned to the incident, while the assignment time is the time elapsed from when the incident is created to the first unit being assigned.
+```{r}
+response_time_by_time_category <- clean_data %>%
+  group_by(call_time_category) %>%
+  # Calculate the average response time
+  summarize(avg_response_time = mean(time_incident_response, na.rm = TRUE)) %>%
+  # Sort the data by average response time in ascending order
+  arrange(avg_response_time)
+
+# View the resulting data
+response_time_by_time_category
+```
+
+#Bar plot showing the average response time for different time categories of calls.
+
+```{r}
+ggplot(response_time_by_time_category, aes(x = call_time_category, y = avg_response_time)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Average Response Time by Time Category",
+       x = "Time Category",
+       y = "Average Response Time (in seconds)")
+```
+
+
+
+```{r}
+assignment_time_by_time_category <- clean_data %>%
+  group_by(call_time_category) %>%
+  # Calculate the average response time
+  summarize(avg_assignment_time = mean(time_elapsed_assignment, na.rm = TRUE)) %>%
+  # Sort the data by average response time in ascending order
+  arrange(avg_assignment_time)
+
+# View the resulting data
+assignment_time_by_time_category
+```
+
+```{r}
+ggplot(assignment_time_by_time_category, aes(x = call_time_category, y = avg_assignment_time)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Average Assignment Time by Time Category",
+       x = "Time Category",
+       y = "Average Assignment Time (in seconds)")
+```
+
+# UseCase-4
+
+#In this use case,the code performs various data analysis and visualization tasks related to call reasons in the dataset clean_data. Key findings such as the top 10 initial call reasons and their frequencies, the number of times initial_call_reason and final_call_reason are not the same, and the top final_call_reasons for specific initial_call_reasons. Plots are generated for each finding
+```{r}
+freq_initial_call_reason <- clean_data %>%
+  group_by(initial_call_reason) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+top_10_initial_call_reasons <- freq_initial_call_reason %>%
+  slice_max(count, n = 10)
+
+ggplot(top_10_initial_call_reasons, aes(x = reorder(initial_call_reason, count), y = count)) +
+  geom_col(fill = "Blue", color = "Black", width = 0.5) +
+  coord_flip() +
+  labs(title = "Top 10 Initial Call Reasons",
+       x = "Initial Call Reason",
+       y = "Count")
+```
+
+```{r}
+sum(clean_data$initial_call_reason != clean_data$final_call_reason)
+```
+
+
+```{r}
+clean_data %>%
+  group_by(initial_call_reason) %>%
+  summarise(num_updates = sum(initial_call_reason != final_call_reason)) %>%
+  arrange(desc(num_updates))
+```
+```{r}
+clean_data %>%
+  filter(initial_call_reason == "UNKNOW") %>%
+  group_by(final_call_reason) %>%
+  count() %>%
+  arrange(desc(n)) %>%
+  head(10) %>%
+  select(-1)
+```
+
+
+```{r}
+clean_data %>%
+  filter(initial_call_reason == "EDP") %>%
+  group_by(final_call_reason) %>%
+  count() %>%
+  arrange(desc(n))
+```
+
+```{r}
+get_final_reason_data <- function(initial_reason) {
+  final_reason_data <- clean_data %>%
+    filter(initial_call_reason == initial_reason) %>%
+    group_by(final_call_reason) %>%
+    count() %>%
+    arrange(desc(n)) %>%
+    head(10) %>%
+    filter(final_call_reason != initial_reason)
+  
+  ggplot(final_reason_data, aes(x = reorder(final_call_reason, -n), y = n, fill = final_call_reason)) +
+    geom_bar(stat = "identity") +
+    scale_fill_brewer(palette = "Set1") +
+    theme_minimal() +
+    labs(title = paste0(initial_reason," Calls by Final Reason"),
+         x = "Final Call Reason",
+         y = "Count")
+}
+
+```
+
+```{r}
+# Call the function with input "EDP"
+get_final_reason_data("EDP")
+get_final_reason_data("UNKNOW")
+get_final_reason_data("INJURY")
+```
+
+
+# UseCase-5
+
+#For this use case, zipcodes were identified according to the highest incident count and also according to the highest response times. This allows us to find the hotstop zones by incidents and by response times. The zones are then plotted on the google map using google cloud API key
+
+# To Obtain a Gmaps API key from Google Cloud, we first need to create a project in our cloud and link a billing account to it.. Then we need to enable the Maps API from the APIs and Services section in our console. Later, we need to go the Credentials Tab and create a API key type of credential. This API key when inserted in our function below acts as an authentication to user the Maps Service.
+```{r}
+clean_data %>%
+  group_by(zipcode) %>%
+  summarize(avg_response_time = mean(time_incident_response, na.rm = TRUE)) %>%
+  arrange(desc(avg_response_time)) %>%
+  head(10)
+```
+```{r}
+hotspot_zones <- clean_data %>%
+  group_by(zipcode) %>%
+  summarize(incident_count=n(),avg_response_time = mean(time_incident_response, na.rm = TRUE)) %>%
+  arrange(desc(incident_count)) %>%
+  head(10)
+
+avg_response_time <- clean_data %>%
+  summarize(mean_time_incident_response = mean(time_incident_response, na.rm = TRUE))
+
+# Print the result
+avg_response_time
+hotspot_zones
+```
+#Hotspot zones by incident counts
+
+```{r}
+register_google(key = "AIzaSyCTc_Fkz9Q7QRAeqWlOfFevj3BpEC8k8BQ")
+
+# Create a dataframe with the top 10 zip codes and their incident counts
+top_zipcodes <- head(hotspot_zones, 10)
+
+# Use ggmap to get the geographical coordinates for each zip code
+top_zipcodes <- cbind(top_zipcodes, geocode(as.character(top_zipcodes$zipcode)))
+
+# Create a map centered on New York City
+ny_map <- get_map(location = "new york city", zoom = 11)
+
+# Plot the zip codes on the map with circles proportional to their incident counts, and make the plot interactive using plotly
+gg <- ggmap(ny_map) +
+  geom_point(data = top_zipcodes, aes(x = lon, y = lat, size = incident_count, text = paste("Zip code:", zipcode, "<br>", "Incident count:", incident_count)), color = "red", alpha = 0.8) +
+  scale_size_continuous(range = c(3, 10)) +
+  ggtitle("Top 10 Zip Codes with the Most Incidents") +
+  xlab("Longitude") +
+  ylab("Latitude") +
+  guides(size = guide_legend(title = "Incident Count")) +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+ggplotly(gg, tooltip = c("text"), height = 600, width = 800)
+```
+
+
+#Checking for the Hotspots by incident counts if they are able to cope up with the high counts.
+#In the plot, the line is the average reponse time for the whole NYC and green bars indicate that they did well and re indicates that the regions were not able to cope up and there is a scope for improvement.
+
+```{r}
+# create a vector of the given values
+values <- hotspot_zones$avg_response_time
+
+# set the reference value
+ref_value <- 513.5109
+
+# create a vector of colors for bars
+colors <- ifelse(values > ref_value, "red", "green")
+
+#png("plot.png", width = 1200, height = 800, res = 150)
+
+# create a bar plot
+barplot(values, names.arg = hotspot_zones$zipcode, col = colors, ylim = c(0, max(values) * 1.2), ylab = "Values")
+
+# add a reference line
+abline(h = ref_value, lty = 2, col = "blue")
+
+barplot
+```
+
+#Hotstop zones by highest response times
+
+```{r}
+register_google(key = "AIzaSyCTc_Fkz9Q7QRAeqWlOfFevj3BpEC8k8BQ")
+
+# Create a dataframe with the top 10 zip codes and their incident counts
+top_zipcodes <- head(hotspot_zones, 10)
+
+# Use ggmap to get the geographical coordinates for each zip code
+top_zipcodes <- cbind(top_zipcodes, geocode(as.character(top_zipcodes$zipcode)))
+
+# Create a map centered on New York City
+ny_map <- get_map(location = "new york city", zoom = 11)
+
+# Plot the zip codes on the map with circles proportional to their incident counts, and make the plot interactive using plotly
+gg <- ggmap(ny_map) +
+  geom_point(data = top_zipcodes, aes(x = lon, y = lat, size = avg_response_time, text = paste("Zip code:", zipcode, "<br>", "Response Times:", avg_response_time)), color = "red", alpha = 0.8) +
+  scale_size_continuous(range = c(3, 10)) +
+  ggtitle("Top 10 Zip Codes with the Most Incidents") +
+  xlab("Longitude") +
+  ylab("Latitude") +
+  guides(size = guide_legend(title = "REsponse Times")) +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+ggplotly(gg, tooltip = c("text"), height = 600, width = 800)
+```
+
+
+# UseCase - 6
+
+#In this use case, we are generating a pie chart to show the distribution of incident_disposition_code_meaning in the clean_data dataset. The pie chart is a useful way to visualize the relative frequencies of different incident_disposition_code_meanings in the dataset and also supports our finding.
+
+```{r}
+incident_disposition_count <- table(clean_data$incident_disposition_code_meaning)
+incident_disposition_percent <- round(prop.table(incident_disposition_count) * 100, 2)
+
+plot_ly(labels = names(incident_disposition_count), values = incident_disposition_count, type = "pie",
+                     textinfo = "label+percent", 
+                     text = paste(names(incident_disposition_count), "(", incident_disposition_percent, "%)"))
+```
+
+
+
+
+
